@@ -118,8 +118,11 @@ class PlanningPolicyRouteTests(unittest.TestCase):
             patch.object(routes_dsl, "DSLParserNode", return_value=parser),
             patch.object(
                 routes_dsl,
-                "_admit_dsl_public_task",
-                return_value="admitted-test-task",
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id="admitted-test-task",
+                    reservation_conflict_mode="OFF",
+                ),
             ),
         ):
             response = routes_dsl.submit_dsl(
@@ -167,8 +170,11 @@ class PlanningPolicyRouteTests(unittest.TestCase):
             patch.object(routes_dsl, "DSLParserNode", return_value=parser),
             patch.object(
                 routes_dsl,
-                "_admit_dsl_public_task",
-                return_value="admitted-test-task",
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id="admitted-test-task",
+                    reservation_conflict_mode="OFF",
+                ),
             ),
         ):
             response = routes_dsl.submit_dsl(
@@ -197,8 +203,11 @@ class PlanningPolicyRouteTests(unittest.TestCase):
             patch.object(routes_dsl, "DSLParserNode", return_value=parser),
             patch.object(
                 routes_dsl,
-                "_admit_dsl_public_task",
-                return_value="admitted-test-task",
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id="admitted-test-task",
+                    reservation_conflict_mode="OFF",
+                ),
             ),
         ):
             response = routes_dsl.submit_manual(
@@ -220,8 +229,11 @@ class PlanningPolicyRouteTests(unittest.TestCase):
             patch.object(routes_dsl, "DSLParserNode", return_value=parser),
             patch.object(
                 routes_dsl,
-                "_admit_dsl_public_task",
-                return_value="admitted-test-task",
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id="admitted-test-task",
+                    reservation_conflict_mode="OFF",
+                ),
             ),
         ):
             response = routes_dsl.render_dsl(

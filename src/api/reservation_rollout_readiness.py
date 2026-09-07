@@ -1,7 +1,7 @@
 """Tenant/policy rollout evidence for a future controlled Reservation canary.
 
-This module is read-only.  A readiness result is neither Reservation authority
-nor a runtime activation input.
+This module is read-only.  A readiness result may feed rollout control, but it
+is never consumed by Planner or Reservation authority.
 """
 
 from __future__ import annotations

@@ -140,8 +140,11 @@ class ChildIdentityTests(unittest.TestCase):
             patch.object(routes_dsl, "DSLParserNode") as parser_cls,
             patch.object(
                 routes_dsl,
-                "_admit_dsl_public_task",
-                return_value=task_id,
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id=task_id,
+                    reservation_conflict_mode="OFF",
+                ),
             ),
             patch.object(routes_dsl, "transition_public_task_status"),
         ):

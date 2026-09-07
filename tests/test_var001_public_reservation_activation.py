@@ -314,7 +314,14 @@ class PublicReservationActivationTests(unittest.TestCase):
                 return_value=ReservationLeaseConfiguration(30, 10),
             ),
             patch.object(routes_dsl.DSLParserNode, "parse_and_resolve") as parse,
-            patch.object(routes_dsl, "_admit_dsl_public_task", return_value=str(uuid.uuid4())),
+            patch.object(
+                routes_dsl,
+                "_admit_dsl_public_task_admission",
+                return_value=Mock(
+                    task_id=str(uuid.uuid4()),
+                    reservation_conflict_mode="ENFORCE",
+                ),
+            ),
         ):
             pools = _pools(1)
             parse.return_value = routes_dsl._plan_exact_main_visual_variants(

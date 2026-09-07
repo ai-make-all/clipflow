@@ -88,6 +88,7 @@ def submit_task(
         batch_size=payload.batch_size,
         reservation_conflict_mode="OFF",
         planning_policy="legacy",
+        reservation_mode_source="DEFAULT_OFF",
     )
 
     try:

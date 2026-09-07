@@ -109,9 +109,12 @@ from .reservation_diagnostics import (
     emit_reservation_diagnostic_event,
 )
 from .public_task_admission import (
+    PublicTaskAdmission,
+    PublicTaskReservationModeDecision,
     admit_public_task,
     transition_public_task_status,
 )
+from .reservation_rollout_control import resolve_omitted_reservation_mode
 from .schemas import (
     CompilationPlan,
     CompilationPlanSummary,
@@ -210,16 +213,70 @@ def _authoritative_request_tenant(
     return authoritative
 
 
-def _admit_dsl_public_task(db: Session, payload: RenderDSLRequest) -> str:
-    """Generate and durably claim one server-owned task ID before dispatch."""
-    admission = admit_public_task(
+def _admit_dsl_public_task_admission(
+    db: Session,
+    payload: RenderDSLRequest,
+    *,
+    tenant_id: str,
+) -> PublicTaskAdmission:
+    """Resolve request explicitness inside atomic server-ID admission."""
+    explicit_mode = (
+        "reservation_conflict_mode" in payload.model_fields_set
+    )
+    if explicit_mode:
+        source = (
+            "EXPLICIT_ENFORCE"
+            if payload.reservation_conflict_mode == _RESERVATION_MODE_ENFORCE
+            else "EXPLICIT_OFF"
+        )
+        return admit_public_task(
+            db.get_bind(),
+            prompt=payload.prompt,
+            batch_size=payload.batch_size,
+            reservation_conflict_mode=payload.reservation_conflict_mode,
+            planning_policy=payload.variant_planning_policy,
+            reservation_mode_source=source,
+        )
+
+    reservation_mode_resolver = None
+    if _requests_authoritative_main_visual(payload):
+        def reservation_mode_resolver(
+            task_id: str,
+        ) -> PublicTaskReservationModeDecision:
+            try:
+                return resolve_omitted_reservation_mode(
+                    db.get_bind(),
+                    canonical_tenant=tenant_id,
+                    planning_policy=payload.variant_planning_policy,
+                    task_id=task_id,
+                )
+            except Exception:
+                return PublicTaskReservationModeDecision(
+                    reservation_conflict_mode=_RESERVATION_MODE_OFF,
+                    reservation_mode_source="DEFAULT_OFF",
+                )
+    return admit_public_task(
         db.get_bind(),
         prompt=payload.prompt,
         batch_size=payload.batch_size,
-        reservation_conflict_mode=payload.reservation_conflict_mode,
+        reservation_conflict_mode=_RESERVATION_MODE_OFF,
         planning_policy=payload.variant_planning_policy,
+        reservation_mode_source="DEFAULT_OFF",
+        reservation_mode_resolver=reservation_mode_resolver,
     )
-    return admission.task_id
+
+
+def _admit_dsl_public_task(db: Session, payload: RenderDSLRequest) -> str:
+    """Compatibility helper returning only the authoritative public task ID."""
+    tenant_id = str(
+        db.info.get("tenant_id")
+        or canonical_tenant_id(payload.tenant_id)
+    )
+    return _admit_dsl_public_task_admission(
+        db,
+        payload,
+        tenant_id=tenant_id,
+    ).task_id
 
 
 def _dispatch_claimed_public_task(
@@ -4439,7 +4496,15 @@ def submit_dsl(
         _worker_kw["resolved_plan"] = plan
         _worker_kw["preview_intent"] = PreviewIntent.AUTOMATIC_PREVIEW
 
-    task_id = _admit_dsl_public_task(db, payload)
+    admission = _admit_dsl_public_task_admission(
+        db,
+        payload,
+        tenant_id=tenant_id,
+    )
+    task_id = admission.task_id
+    _worker_kw["reservation_conflict_mode"] = (
+        admission.reservation_conflict_mode
+    )
     _dispatch_claimed_public_task(
         background_tasks,
         db.get_bind(),
@@ -4547,7 +4612,15 @@ def submit_manual(
         "reservation_conflict_mode": payload.reservation_conflict_mode,
     }
 
-    task_id = _admit_dsl_public_task(db, payload)
+    admission = _admit_dsl_public_task_admission(
+        db,
+        payload,
+        tenant_id=tenant_id,
+    )
+    task_id = admission.task_id
+    worker_kwargs["reservation_conflict_mode"] = (
+        admission.reservation_conflict_mode
+    )
     _dispatch_claimed_public_task(
         background_tasks,
         db.get_bind(),
@@ -4683,7 +4756,15 @@ def render_dsl(
         "reservation_conflict_mode": payload.reservation_conflict_mode,
     }
 
-    task_id = _admit_dsl_public_task(db, payload)
+    admission = _admit_dsl_public_task_admission(
+        db,
+        payload,
+        tenant_id=tenant_id,
+    )
+    task_id = admission.task_id
+    _worker_kw["reservation_conflict_mode"] = (
+        admission.reservation_conflict_mode
+    )
     _dispatch_claimed_public_task(
         background_tasks,
         db.get_bind(),

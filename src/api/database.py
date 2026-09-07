@@ -19,7 +19,7 @@ import sqlite3
 import threading
 
 from fastapi import Request
-from sqlalchemy import String, create_engine, event, inspect as sa_inspect, text
+from sqlalchemy import Integer, String, create_engine, event, inspect as sa_inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
@@ -217,6 +217,7 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
         column["name"]: column
         for column in inspector.get_columns("video_tasks")
     }
+    source_was_missing = "reservation_mode_source" not in columns
     additions = {
         "reservation_conflict_mode": (
             "TEXT NOT NULL DEFAULT 'OFF' "
@@ -228,6 +229,27 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
             "'legacy', 'exact_main_visual', 'exact_main_visual_balanced'"
             "))"
         ),
+        "reservation_mode_source": (
+            "TEXT NOT NULL DEFAULT 'DEFAULT_OFF' "
+            "CHECK (reservation_mode_source IN ("
+            "'DEFAULT_OFF', 'EXPLICIT_OFF', "
+            "'EXPLICIT_ENFORCE', 'ROLLOUT_CANARY'"
+            "))"
+        ),
+        "rollout_generation": "TEXT",
+        "rollout_bucket": (
+            "INTEGER CHECK ("
+            "rollout_bucket IS NULL "
+            "OR (rollout_bucket >= 0 AND rollout_bucket < 10000)"
+            ")"
+        ),
+        "rollout_canary_basis_points": (
+            "INTEGER CHECK ("
+            "rollout_canary_basis_points IS NULL "
+            "OR (rollout_canary_basis_points >= 0 "
+            "AND rollout_canary_basis_points <= 10000)"
+            ")"
+        ),
     }
     with engine.begin() as conn:
         for name, definition in additions.items():
@@ -238,6 +260,14 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
                         f'ADD COLUMN "{name}" {definition}'
                     )
                 )
+        if source_was_missing:
+            conn.execute(
+                text(
+                    "UPDATE video_tasks "
+                    "SET reservation_mode_source = 'EXPLICIT_ENFORCE' "
+                    "WHERE reservation_conflict_mode = 'ENFORCE'"
+                )
+            )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS "
@@ -246,19 +276,44 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
                 "(reservation_conflict_mode, planning_policy, created_at)"
             )
         )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_video_tasks_rollout_canary_cohort "
+                "ON video_tasks "
+                "(reservation_mode_source, planning_policy, "
+                "rollout_generation, created_at)"
+            )
+        )
 
     inspector = sa_inspect(engine)
     columns = {
         column["name"]: column
         for column in inspector.get_columns("video_tasks")
     }
-    for name in additions:
+    for name in (
+        "reservation_conflict_mode",
+        "planning_policy",
+        "reservation_mode_source",
+    ):
         column = columns.get(name)
         if (
             column is None
             or column.get("nullable", True)
             or not isinstance(column["type"], String)
         ):
+            raise TaskRolloutMetadataSchemaError(
+                VIDEO_TASK_ROLLOUT_METADATA_SCHEMA_INVALID
+            )
+
+    nullable_types = {
+        "rollout_generation": String,
+        "rollout_bucket": Integer,
+        "rollout_canary_basis_points": Integer,
+    }
+    for name, expected_type in nullable_types.items():
+        column = columns.get(name)
+        if column is None or not isinstance(column["type"], expected_type):
             raise TaskRolloutMetadataSchemaError(
                 VIDEO_TASK_ROLLOUT_METADATA_SCHEMA_INVALID
             )
@@ -275,6 +330,15 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
         raise TaskRolloutMetadataSchemaError(
             VIDEO_TASK_ROLLOUT_METADATA_SCHEMA_INVALID
         )
+    if (
+        "reservation_mode_source",
+        "planning_policy",
+        "rollout_generation",
+        "created_at",
+    ) not in indexes:
+        raise TaskRolloutMetadataSchemaError(
+            VIDEO_TASK_ROLLOUT_METADATA_SCHEMA_INVALID
+        )
 
     with engine.connect() as conn:
         invalid = conn.execute(
@@ -286,7 +350,44 @@ def ensure_video_task_rollout_metadata_schema(engine) -> None:
                 "OR planning_policy NOT IN ("
                 "'legacy', 'exact_main_visual', "
                 "'exact_main_visual_balanced'"
-                ") LIMIT 1"
+                ") "
+                "OR reservation_mode_source IS NULL "
+                "OR reservation_mode_source NOT IN ("
+                "'DEFAULT_OFF', 'EXPLICIT_OFF', "
+                "'EXPLICIT_ENFORCE', 'ROLLOUT_CANARY'"
+                ") "
+                "OR ("
+                "reservation_mode_source = 'ROLLOUT_CANARY' "
+                "AND ("
+                "reservation_conflict_mode != 'ENFORCE' "
+                "OR rollout_generation IS NULL "
+                "OR length(rollout_generation) NOT BETWEEN 1 AND 64 "
+                "OR rollout_generation GLOB "
+                "'*[^A-Za-z0-9._-]*' "
+                "OR rollout_bucket IS NULL "
+                "OR rollout_bucket < 0 OR rollout_bucket >= 10000 "
+                "OR rollout_canary_basis_points IS NULL "
+                "OR rollout_canary_basis_points <= 0 "
+                "OR rollout_canary_basis_points > 10000 "
+                "OR rollout_bucket >= rollout_canary_basis_points"
+                ")) "
+                "OR ("
+                "reservation_mode_source = 'EXPLICIT_ENFORCE' "
+                "AND ("
+                "reservation_conflict_mode != 'ENFORCE' "
+                "OR rollout_generation IS NOT NULL "
+                "OR rollout_bucket IS NOT NULL "
+                "OR rollout_canary_basis_points IS NOT NULL"
+                ")) "
+                "OR ("
+                "reservation_mode_source IN ('DEFAULT_OFF', 'EXPLICIT_OFF') "
+                "AND ("
+                "reservation_conflict_mode != 'OFF' "
+                "OR rollout_generation IS NOT NULL "
+                "OR rollout_bucket IS NOT NULL "
+                "OR rollout_canary_basis_points IS NOT NULL"
+                ")) "
+                "LIMIT 1"
             )
         ).first()
     if invalid is not None:
@@ -322,7 +423,10 @@ def canonical_tenant_id(tenant_id: str | None) -> str:
         for character in raw_tenant_id
         if character.isalnum() or character in ("_", "-")
     )
-    return safe_tenant_id or "default"
+    # Align cache/config identity with the platform's filename identity.
+    # On Windows this folds case, preventing two Engines from treating the
+    # same case-insensitive SQLite path as different tenant authorities.
+    return os.path.normcase(safe_tenant_id or "default")
 
 
 def request_tenant_id(request: Request) -> str:

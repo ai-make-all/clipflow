@@ -28,6 +28,18 @@ _CLIENT_RESERVATION_AUTHORITY_FIELDS = frozenset(
         "execution_id",
         "reservation_lease_ttl_seconds",
         "reservation_heartbeat_interval_seconds",
+        "rollout_enabled",
+        "rollout_generation",
+        "tenant_allowlist",
+        "canary_basis_points",
+        "rollout_canary_basis_points",
+        "assignment_secret",
+        "rollout_bucket",
+        "breaker_state",
+        "breaker_tripped",
+        "breaker_reset",
+        "rollback_thresholds",
+        "rollout_kill_switch",
     }
 )
 

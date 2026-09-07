@@ -6,11 +6,11 @@ from datetime import datetime
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .database import get_db
+from .database import get_db, request_tenant_id
 from .reservation_diagnostics import (
     RESERVATION_DIAGNOSTICS_UNAVAILABLE,
     reservation_diagnostics_summary,
@@ -21,6 +21,13 @@ from .reservation_rollout_readiness import (
     ReservationRolloutReadinessConfigurationError,
     load_reservation_rollout_readiness_configuration,
     reservation_rollout_readiness,
+)
+from .reservation_rollout_control import (
+    RESERVATION_ROLLOUT_CONTROL_CONFIGURATION_INVALID,
+    RESERVATION_ROLLOUT_STATUS_UNAVAILABLE,
+    ReservationRolloutControlConfigurationError,
+    load_reservation_rollout_control_configuration,
+    reservation_rollout_status,
 )
 
 
@@ -109,6 +116,44 @@ class ReservationRolloutReadinessResponse(BaseModel):
     gates: list[ReservationRolloutReadinessGateResponse]
 
 
+class ReservationRolloutStatusResponse(BaseModel):
+    planningPolicy: Literal[
+        "exact_main_visual",
+        "exact_main_visual_balanced",
+    ]
+    state: Literal[
+        "DISABLED",
+        "NOT_ELIGIBLE",
+        "WARMING_UP",
+        "CANARY_ACTIVE",
+        "KILL_SWITCHED",
+        "AUTO_ROLLED_BACK",
+    ]
+    rolloutGeneration: str | None
+    canaryBasisPoints: int | None
+    readinessState: Literal[
+        "NOT_CONFIGURED",
+        "INSUFFICIENT_EVIDENCE",
+        "BLOCKED",
+        "READY_FOR_CONTROLLED_CANARY",
+    ] | None
+    breakerTripped: bool
+    breakerReason: str | None
+    rollbackWindow: Literal["1h", "24h", "7d"] | None
+    from_time: datetime | None = Field(alias="from")
+    to_time: datetime | None = Field(alias="to")
+    canaryTaskCount: int | None
+    diagnosticRunCoverageRate: float | None
+    planningObservationCoverageRate: float | None
+    terminalObservationCoverageRate: float | None
+    zeroPlanConflictRate: float | None
+    partialPlanRate: float | None
+    authorityLossRate: float | None
+    terminalPersistFailureRate: float | None
+    workerLeaseConfigFailureRate: float | None
+    cleanupWarningRate: float | None
+
+
 @router.get("/summary", response_model=ReservationDiagnosticsSummaryResponse)
 def get_reservation_diagnostics_summary(
     window: Literal["1h", "24h", "7d", "30d"] = Query(default="24h"),
@@ -177,4 +222,55 @@ def get_reservation_rollout_readiness(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=RESERVATION_ROLLOUT_READINESS_UNAVAILABLE,
+        ) from exc
+
+
+@router.get(
+    "/rollout-status",
+    response_model=ReservationRolloutStatusResponse,
+)
+def get_reservation_rollout_status(
+    request: Request,
+    planning_policy: Literal[
+        "exact_main_visual",
+        "exact_main_visual_balanced",
+    ] = Query(...),
+    db: Session = Depends(get_db),
+) -> ReservationRolloutStatusResponse:
+    """Return tenant-local aggregate rollout control state without mutation."""
+    try:
+        configuration = load_reservation_rollout_control_configuration()
+        return ReservationRolloutStatusResponse.model_validate(
+            reservation_rollout_status(
+                db,
+                canonical_tenant=request_tenant_id(request),
+                planning_policy=planning_policy,
+                configuration=configuration,
+            )
+        )
+    except ReservationRolloutControlConfigurationError as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.error(
+            "[RESERVATION_ROLLOUT_STATUS_CONFIG_FAILED] category=%s",
+            type(exc).__name__[:64],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=RESERVATION_ROLLOUT_CONTROL_CONFIGURATION_INVALID,
+        ) from exc
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.error(
+            "[RESERVATION_ROLLOUT_STATUS_QUERY_FAILED] category=%s",
+            type(exc).__name__[:64],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=RESERVATION_ROLLOUT_STATUS_UNAVAILABLE,
         ) from exc

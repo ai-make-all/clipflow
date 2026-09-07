@@ -45,10 +45,53 @@ class VideoTask(Base):
             ")",
             name="ck_video_tasks_planning_policy",
         ),
+        CheckConstraint(
+            "reservation_mode_source IN ("
+            "'DEFAULT_OFF', 'EXPLICIT_OFF', "
+            "'EXPLICIT_ENFORCE', 'ROLLOUT_CANARY'"
+            ")",
+            name="ck_video_tasks_reservation_mode_source",
+        ),
+        CheckConstraint(
+            "("
+            "reservation_mode_source = 'ROLLOUT_CANARY' "
+            "AND reservation_conflict_mode = 'ENFORCE' "
+            "AND rollout_generation IS NOT NULL "
+            "AND length(rollout_generation) BETWEEN 1 AND 64 "
+            "AND rollout_generation NOT GLOB "
+            "'*[^A-Za-z0-9._-]*' "
+            "AND rollout_bucket IS NOT NULL "
+            "AND rollout_bucket >= 0 AND rollout_bucket < 10000 "
+            "AND rollout_canary_basis_points IS NOT NULL "
+            "AND rollout_canary_basis_points > 0 "
+            "AND rollout_canary_basis_points <= 10000 "
+            "AND rollout_bucket < rollout_canary_basis_points"
+            ") OR ("
+            "reservation_mode_source = 'EXPLICIT_ENFORCE' "
+            "AND reservation_conflict_mode = 'ENFORCE' "
+            "AND rollout_generation IS NULL "
+            "AND rollout_bucket IS NULL "
+            "AND rollout_canary_basis_points IS NULL"
+            ") OR ("
+            "reservation_mode_source IN ('DEFAULT_OFF', 'EXPLICIT_OFF') "
+            "AND reservation_conflict_mode = 'OFF' "
+            "AND rollout_generation IS NULL "
+            "AND rollout_bucket IS NULL "
+            "AND rollout_canary_basis_points IS NULL"
+            ")",
+            name="ck_video_tasks_rollout_metadata_consistency",
+        ),
         Index(
             "ix_video_tasks_rollout_readiness",
             "reservation_conflict_mode",
             "planning_policy",
+            "created_at",
+        ),
+        Index(
+            "ix_video_tasks_rollout_canary_cohort",
+            "reservation_mode_source",
+            "planning_policy",
+            "rollout_generation",
             "created_at",
         ),
     )
@@ -71,6 +114,15 @@ class VideoTask(Base):
         default="legacy",
         server_default="legacy",
     )
+    reservation_mode_source = Column(
+        String(32),
+        nullable=False,
+        default="DEFAULT_OFF",
+        server_default="DEFAULT_OFF",
+    )
+    rollout_generation = Column(String(64), nullable=True)
+    rollout_bucket = Column(Integer, nullable=True)
+    rollout_canary_basis_points = Column(Integer, nullable=True)
     created_at      = Column(DateTime(timezone=True), nullable=False, default=_now)
     finished_at     = Column(DateTime(timezone=True), nullable=True)
 
@@ -128,6 +180,53 @@ class ReservationRunDiagnostic(Base):
         index=True,
     )
     finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ================================================================== #
+# ReservationRolloutBreaker — tenant-local automatic rollback latch   #
+# ================================================================== #
+class ReservationRolloutBreaker(Base):
+    """Durable rollout-control evidence; never Reservation authority."""
+
+    __tablename__ = "reservation_rollout_breakers"
+    __table_args__ = (
+        UniqueConstraint(
+            "planning_policy",
+            "rollout_generation",
+            name="uq_reservation_rollout_breaker_policy_generation",
+        ),
+        CheckConstraint(
+            "planning_policy IN ("
+            "'exact_main_visual', 'exact_main_visual_balanced'"
+            ")",
+            name="ck_reservation_rollout_breaker_planning_policy",
+        ),
+        CheckConstraint(
+            "reason_code IN ("
+            "'READINESS_LOST', "
+            "'DIAGNOSTIC_RUN_COVERAGE_BELOW_MINIMUM', "
+            "'PLANNING_OBSERVATION_COVERAGE_BELOW_MINIMUM', "
+            "'TERMINAL_OBSERVATION_COVERAGE_BELOW_MINIMUM', "
+            "'ZERO_PLAN_CONFLICT_RATE_EXCEEDED', "
+            "'PARTIAL_PLAN_RATE_EXCEEDED', "
+            "'AUTHORITY_LOSS_RATE_EXCEEDED', "
+            "'TERMINAL_PERSIST_FAILURE_RATE_EXCEEDED', "
+            "'WORKER_LEASE_CONFIG_FAILURE_RATE_EXCEEDED', "
+            "'CLEANUP_WARNING_RATE_EXCEEDED'"
+            ")",
+            name="ck_reservation_rollout_breaker_reason_code",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    planning_policy = Column(String(64), nullable=False)
+    rollout_generation = Column(String(64), nullable=False)
+    reason_code = Column(String(64), nullable=False)
+    tripped_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+    )
 
 
 # ================================================================== #
