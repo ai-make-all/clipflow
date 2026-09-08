@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pyngrok import ngrok
 
 from src.core.logger import setup_logger, logger
+from src.version import APPLICATION_VERSION
 from src.api.database import engine, initialize_application_schema
 from src.api.schemas import HealthResponse
 from src.api import routes as task_routes
@@ -125,7 +126,7 @@ app = FastAPI(
         "纯粹的高并发音视频渲染引擎，通过标准化 Headless API 向外暴露能力，"
         "供 GrowthOS 等上层业务系统无缝接入。"
     ),
-    version="0.5.0",
+    version=APPLICATION_VERSION,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -160,7 +161,7 @@ async def health_check() -> HealthResponse:
     """
     return HealthResponse(
         status="DopaMatrix Engine is running",
-        version="0.5.0",
+        version=APPLICATION_VERSION,
         db="connected",
     )
 
